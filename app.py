@@ -11,44 +11,55 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.ext.declarative import declarative_base
 
+# --- Database Setup ---
 DATABASE_URL = 'sqlite:///./database.db'
 
+# Create the SQLite engine (check_same_thread=False needed for SQLite + FastAPI)
 engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False})
+
+# Session factory — each request gets its own session
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+# Base class for all ORM models
 Base = declarative_base()
 
 app = FastAPI()
 
 
+# --- ORM Models ---
+
 class Todo(Base):
     __tablename__ = 'todos'
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, index=True)
+    id          = Column(Integer, primary_key=True, index=True)
+    title       = Column(String, index=True)
     description = Column(String, nullable=True)
-    completed = Column(Boolean, default=False)
+    completed   = Column(Boolean, default=False)
 
 
 class Reminder(Base):
     __tablename__ = 'reminders'
-    id = Column(Integer, primary_key=True, index=True)
+    id            = Column(Integer, primary_key=True, index=True)
     reminder_text = Column(String)
-    importance = Column(String)
+    importance    = Column(String)   # e.g. "high", "medium", "low"
 
 
 class CalendarEvent(Base):
     __tablename__ = 'calendar_events'
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String, index=True)
+    id          = Column(Integer, primary_key=True, index=True)
+    title       = Column(String, index=True)
     description = Column(String)
-    event_from = Column(DateTime)
-    event_to = Column(DateTime)
+    event_from  = Column(DateTime)
+    event_to    = Column(DateTime)
 
 
+# Create all tables on startup if they don't already exist
 Base.metadata.create_all(bind=engine)
 
 
+# --- DB Dependency ---
+
 def get_db():
+    """Yield a DB session per request and close it when done."""
     db = SessionLocal()
     try:
         yield db
@@ -56,9 +67,11 @@ def get_db():
         db.close()
 
 
+# --- Pydantic Schemas for VAPI Webhook Payload ---
+
 class ToolCallFunction(BaseModel):
     name: str
-    arguments: str | dict
+    arguments: str | dict   # VAPI may send args as a JSON string or a dict
 
 class ToolCall(BaseModel):
     id: str
@@ -68,7 +81,11 @@ class Message(BaseModel):
     toolCalls: list[ToolCall]
 
 class VapiRequest(BaseModel):
+    """Top-level shape of every incoming VAPI tool call webhook."""
     message: Message
+
+
+# --- Pydantic Response Schemas ---
 
 class TodoResponse(BaseModel):
     id: int
@@ -77,7 +94,7 @@ class TodoResponse(BaseModel):
     completed: bool
 
     class Config:
-        orm_mode = True
+        orm_mode = True   # allows building from SQLAlchemy ORM objects
 
 class ReminderResponse(BaseModel):
     id: int
@@ -98,10 +115,63 @@ class CalendarEventResponse(BaseModel):
         orm_mode = True
 
 
+# ============================================================
+# TODO ENDPOINTS
+# ============================================================
+
 @app.post('/create_todo/')
 def create_todo(request: VapiRequest, db: Session = Depends(get_db)):
+    """Create a new todo item from a VAPI createTodo tool call."""
+
+    # Find the matching tool call in the payload
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'createTodo':
+            args = tool_call.function.arguments
+            break
+    else:
+        raise HTTPException(status_code=400, detail='Invalid Request')
+
+    # Arguments may arrive as a raw JSON string — parse if needed
+    if isinstance(args, str):
+        args = json.loads(args)
+
+    title       = args.get('title', '')
+    description = args.get('description', '')
+
+    # Persist the new todo
+    todo = Todo(title=title, description=description)
+    db.add(todo)
+    db.commit()
+    db.refresh(todo)
+
+    return {
+        'results': [{'toolCallId': tool_call.id, 'result': 'success'}]
+    }
+
+
+@app.post('/get_todos/')
+def get_todos(request: VapiRequest, db: Session = Depends(get_db)):
+    """Return all todos for a VAPI getTodos tool call."""
+
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == 'getTodos':
+            todos = db.query(Todo).all()
+            return {
+                'results': [{
+                    'toolCallId': tool_call.id,
+                    'result': [TodoResponse.from_orm(todo).dict() for todo in todos]
+                }]
+            }
+    else:
+        raise HTTPException(status_code=400, detail='Invalid Request')
+
+
+@app.post('/complete_todo/')
+def complete_todo(request: VapiRequest, db: Session = Depends(get_db)):
+    """Mark an existing todo as completed via a VAPI completeTodo tool call."""
+
+    for tool_call in request.message.toolCalls:
+        if tool_call.function.name == 'completeTodo':
             args = tool_call.function.arguments
             break
     else:
@@ -110,87 +180,32 @@ def create_todo(request: VapiRequest, db: Session = Depends(get_db)):
     if isinstance(args, str):
         args = json.loads(args)
 
-    title = args.get('title', '')
-    description = args.get('description', '')
-
-    todo = Todo(title=title, description=description)
-
-    db.add(todo)
-    db.commit()
-    db.refresh(todo)
-
-    return {
-        'results': [
-            {
-                'toolCallId': tool_call.id,
-                'result': 'success'
-            }
-        ]
-    }
-
-
-@app.post('/get_todos/')
-def get_todos(request: VapiRequest, db: Session = Depends(get_db)):
-    for tool_call in request.message.toolCalls:
-        if tool_call.function.name == 'getTodos':
-            todos = db.query(Todo).all()
-
-            return {
-                'results': [
-                    {
-                        'toolCallId': tool_call.id,
-                        'result': [TodoResponse.from_orm(todo).dict() for todo in todos]
-                    }
-                ]
-            }
-    else:
-        raise HTTPException(status_code=400, detail='Invalid Request')
-
-     
-
-@app.post('/complete_todo/')
-def complete_todo(request: VapiRequest, db: Session = Depends(get_db)):
-    for tool_call in request.message.toolCalls:
-            if tool_call.function.name == 'completeTodo':
-                args = tool_call.function.arguments
-                break
-    else:
-        raise HTTPException(status_code=400, detail='Invalid Request')
-
-    if isinstance(args, str):
-        args = json.loads(args)
-
     todo_id = args.get('id')
-
     if not todo_id:
         raise HTTPException(status_code=400, detail='Missing To-Do ID')
 
     todo = db.query(Todo).filter(Todo.id == todo_id).first()
-
     if not todo:
         raise HTTPException(status_code=404, detail='Todo not found')
 
+    # Flip the completed flag and save
     todo.completed = True
-
     db.commit()
     db.refresh(todo)
 
     return {
-        'results': [
-            {
-                'toolCallId': tool_call.id,
-                'result': 'success'
-            }
-        ]
+        'results': [{'toolCallId': tool_call.id, 'result': 'success'}]
     }
 
 
 @app.post('/delete_todo/')
 def delete_todo(request: VapiRequest, db: Session = Depends(get_db)):
+    """Delete a todo by ID via a VAPI deleteTodo tool call."""
+
     for tool_call in request.message.toolCalls:
-            if tool_call.function.name == 'deleteTodo':
-                args = tool_call.function.arguments
-                break
+        if tool_call.function.name == 'deleteTodo':
+            args = tool_call.function.arguments
+            break
     else:
         raise HTTPException(status_code=400, detail='Invalid Request')
 
@@ -198,12 +213,10 @@ def delete_todo(request: VapiRequest, db: Session = Depends(get_db)):
         args = json.loads(args)
 
     todo_id = args.get('id')
-
     if not todo_id:
         raise HTTPException(status_code=400, detail='Missing To-Do ID')
 
     todo = db.query(Todo).filter(Todo.id == todo_id).first()
-
     if not todo:
         raise HTTPException(status_code=404, detail='Todo not found')
 
@@ -211,94 +224,122 @@ def delete_todo(request: VapiRequest, db: Session = Depends(get_db)):
     db.commit()
 
     return {
-        'results': [
-            {
-                'toolCallId': tool_call.id,
-                'result': 'success'
-            }
-        ]
+        'results': [{'toolCallId': tool_call.id, 'result': 'success'}]
     }
+
+
+# ============================================================
+# REMINDER ENDPOINTS
+# ============================================================
 
 @app.post('/add_reminder/')
 def add_reminder(request: VapiRequest, db: Session = Depends(get_db)):
+    """Add a new reminder via a VAPI addReminder tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'addReminder':
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
+
             reminder_text = args.get('reminder_text')
-            importance = args.get('importance')
+            importance    = args.get('importance')
+
             if not reminder_text or not importance:
-                raise HTTPException(status_code=400, detail="Missing required fields")
+                raise HTTPException(status_code=400, detail='Missing required fields')
+
             reminder = Reminder(reminder_text=reminder_text, importance=importance)
             db.add(reminder)
             db.commit()
             db.refresh(reminder)
+
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
                     'result': ReminderResponse.from_orm(reminder).dict()
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
+
+    raise HTTPException(status_code=400, detail='Invalid request')
+
 
 @app.post('/get_reminders/')
 def get_reminders(request: VapiRequest, db: Session = Depends(get_db)):
+    """Return all reminders via a VAPI getReminders tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'getReminders':
             reminders = db.query(Reminder).all()
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
-                    'result': [ReminderResponse.from_orm(reminder).dict() for reminder in reminders]
+                    'result': [ReminderResponse.from_orm(r).dict() for r in reminders]
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
+
+    raise HTTPException(status_code=400, detail='Invalid request')
+
 
 @app.post('/delete_reminder/')
 def delete_reminder(request: VapiRequest, db: Session = Depends(get_db)):
+    """Delete a reminder by ID via a VAPI deleteReminder tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'deleteReminder':
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
+
             reminder_id = args.get('id')
             if not reminder_id:
-                raise HTTPException(status_code=400, detail="Missing reminder ID")
+                raise HTTPException(status_code=400, detail='Missing reminder ID')
+
             reminder = db.query(Reminder).filter(Reminder.id == reminder_id).first()
             if not reminder:
-                raise HTTPException(status_code=404, detail="Reminder not found")
+                raise HTTPException(status_code=404, detail='Reminder not found')
+
             db.delete(reminder)
             db.commit()
+
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
                     'result': {'id': reminder_id, 'deleted': True}
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
+
+    raise HTTPException(status_code=400, detail='Invalid request')
+
+
+# ============================================================
+# CALENDAR ENDPOINTS
+# ============================================================
 
 @app.post('/add_calendar_entry/')
 def add_calendar_entry(request: VapiRequest, db: Session = Depends(get_db)):
+    """Create a new calendar event via a VAPI addCalendarEntry tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'addCalendarEntry':
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
-            title = args.get('title', '')
-            description = args.get('description', '')
+
+            title          = args.get('title', '')
+            description    = args.get('description', '')
             event_from_str = args.get('event_from', '')
-            event_to_str = args.get('event_to', '')
-            
+            event_to_str   = args.get('event_to', '')
+
             if not title or not event_from_str or not event_to_str:
-                raise HTTPException(status_code=400, detail="Missing required fields")
-            
+                raise HTTPException(status_code=400, detail='Missing required fields')
+
+            # Parse ISO 8601 datetime strings (e.g. "2024-01-15T10:00:00")
             try:
                 event_from = dt.datetime.fromisoformat(event_from_str)
-                event_to = dt.datetime.fromisoformat(event_to_str)
+                event_to   = dt.datetime.fromisoformat(event_to_str)
             except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format.")
-            
+                raise HTTPException(status_code=400, detail='Invalid date format. Use ISO format.')
+
             calendar_event = CalendarEvent(
                 title=title,
                 description=description,
@@ -308,49 +349,60 @@ def add_calendar_entry(request: VapiRequest, db: Session = Depends(get_db)):
             db.add(calendar_event)
             db.commit()
             db.refresh(calendar_event)
+
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
                     'result': CalendarEventResponse.from_orm(calendar_event).dict()
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
+
+    raise HTTPException(status_code=400, detail='Invalid request')
+
 
 @app.post('/get_calendar_entries/')
 def get_calendar_entries(request: VapiRequest, db: Session = Depends(get_db)):
+    """Return all calendar events via a VAPI getCalendarEntries tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'getCalendarEntries':
             events = db.query(CalendarEvent).all()
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
-                    'result': [CalendarEventResponse.from_orm(event).dict() for event in events]
+                    'result': [CalendarEventResponse.from_orm(e).dict() for e in events]
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
+
+    raise HTTPException(status_code=400, detail='Invalid request')
 
 
 @app.post('/delete_calendar_entry/')
 def delete_calendar_entry(request: VapiRequest, db: Session = Depends(get_db)):
+    """Delete a calendar event by ID via a VAPI deleteCalendarEntry tool call."""
+
     for tool_call in request.message.toolCalls:
         if tool_call.function.name == 'deleteCalendarEntry':
             args = tool_call.function.arguments
             if isinstance(args, str):
                 args = json.loads(args)
+
             event_id = args.get('id')
             if not event_id:
-                raise HTTPException(status_code=400, detail="Missing event ID")
+                raise HTTPException(status_code=400, detail='Missing event ID')
+
             event = db.query(CalendarEvent).filter(CalendarEvent.id == event_id).first()
             if not event:
-                raise HTTPException(status_code=404, detail="Calendar event not found")
+                raise HTTPException(status_code=404, detail='Calendar event not found')
+
             db.delete(event)
             db.commit()
+
             return {
                 'results': [{
                     'toolCallId': tool_call.id,
                     'result': {'id': event_id, 'deleted': True}
                 }]
             }
-    raise HTTPException(status_code=400, detail="Invalid request")
 
-
+    raise HTTPException(status_code=400, detail='Invalid request')
