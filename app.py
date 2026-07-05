@@ -115,7 +115,6 @@ class CalendarEventResponse(BaseModel):
         orm_mode = True
 
 
-# ===================================
 @app.post('/create_todo/')
 def create_todo(request: VapiRequest, db: Session = Depends(get_db)):
     """Create a new todo item from a VAPI createTodo tool call."""
