@@ -117,7 +117,7 @@ class CalendarEventResponse(BaseModel):
 
 # ============================================================
 # TODO ENDPOINTS
-# ============================================================
+# ===============================
 
 @app.post('/create_todo/')
 def create_todo(request: VapiRequest, db: Session = Depends(get_db)):
