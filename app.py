@@ -224,7 +224,7 @@ def delete_todo(request: VapiRequest, db: Session = Depends(get_db)):
     }
 
 
-# ============================================================
+# =====================================
 
 @app.post('/add_reminder/')
 def add_reminder(request: VapiRequest, db: Session = Depends(get_db)):
