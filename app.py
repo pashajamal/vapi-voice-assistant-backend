@@ -304,7 +304,7 @@ def delete_reminder(request: VapiRequest, db: Session = Depends(get_db)):
     raise HTTPException(status_code=400, detail='Invalid request')
 
 
-# ==========================================
+# =====================
 
 @app.post('/add_calendar_entry/')
 def add_calendar_entry(request: VapiRequest, db: Session = Depends(get_db)):
